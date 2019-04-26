@@ -36,7 +36,7 @@ app.use(bodyParser.json());
 
 //Return all the shops
 app.get("/shops",function(req,res){
-			client.query('SELECT * FROM shops ', function (error, results, fields) {
+			client.query('SELECT * FROM vendors ', function (error, results, fields) {
 				if(error){
 					console.log(error);
 					res.status(500).send({message: error});
@@ -85,27 +85,52 @@ app.post("/login",function(req,res){
 		
 		var uname = req.body.username;
 		var passd = req.body.password;
-		//console.log(req.body);
-		var flag = 0;
-		      connection.query(`SELECT * FROM users WHERE username = $1`, [uname], function (error, results) {
-	    if (error){
-			res.status(500).send({message: error});
+		var type = req.body.user_type;
+		
+		if(type==='user'){
+			client.query(`SELECT * FROM users WHERE username = $1`, [uname], function (error, results) {
+				if (error){
+					res.status(500).send({message: error});
+				}
+				if (results['rows'].length === 0) {
+					res.status(400).send({message: "details incorrect"});
+				}else{
+					bcrypt.compare(passd, results['rows'][0]['password'])
+					.then(boolean => {
+						if(!boolean){
+							res.status(400).send({message: "details incorrect"})
+						}else{
+							res.status(200).send({user: results['rows'][0]['username']});
+						}		
+					}).catch(error => {
+						console.log(error);
+					});
+				}				
+			});		
+		}else if(type=='vendor'){
+			client.query(`SELECT * FROM vendors WHERE vendor_uname = $1`, [uname], function (error, results) {
+				if (error){
+					res.status(500).send({message: error});
+				}
+				
+				if (results['rows'].length === 0) {
+					res.status(400).send({message: "details incorrect"});
+				}else{
+					bcrypt.compare(passd, results['rows'][0]['password'])
+						.then(boolean => {
+							if(!boolean){
+								res.status(400).send({message: "details incorrect"})
+							}else{
+								res.status(200).send({user: results['rows'][0]['vendor_uname']});
+							}
+						}).catch(error => {res.status(400).send({message: error})});	
+				}
+			});		
+
+		}else if(type==='admin'){
+			//YET TO BE IMPLEMENTED
 		}
 
-	    if (results.length === 0) {
-	        res.status(400).send({message: "details incorrect"})
-	    }
-
-	    bcrypt.compare(passd, results[0].password)
-	        .then(boolean => {
-	            if(!boolean){
-	                res.send({message: "details incorrect"})
-	            }
-
-	            res.status(200).send({user: {username: results[0].username}})
-	        }).catch(error => {res.status(400).send({message: error})});
-	});
-			//res.send("No match found");
 });
 
 
@@ -133,6 +158,74 @@ app.post("/register",function(req,res){
 });
 
 
+//Place a new order
+app.post("/order", function(req, res){
+
+	//Order in form of a JSON array
+	var order = req.body;
+	console.log(order);
+	//Generate a unique order id
+	var newOrderId;
+	var noOfRows=0;
+	//Retrieve the previous order id
+	client.query('select max(order_id) from orders', function(error, results){
+		if(error){
+			console.log(error);
+			res.status(500).send(error);
+		}else{
+			if(results['rows'][0]['max']===null){
+				newOrderId = '1';
+			}else{
+				var currOrderId = results['rows'][0]['max'];
+				console.log('Max ID: ' + currOrderId);
+				newOrderId = Number(currOrderId)+1;
+				console.log('New Order ID: ' + newOrderId);		
+			}
+
+			//Insert a row for each item in the order
+			for(var i=0; i<order.length; i++){
+				var currObj = order[i];
+				var username = currObj['username'];
+				var itemId = currObj['item_id'];
+				var quantity = currObj['quantity'];
+				var timestamp = new Date();
+				var status = 'NOT PREPARED';
+				var vendorUsername = currObj['vendor_uname'];
+				client.query('insert into orders(order_id, username, item_id, quantity, timestamp, status, vendor_uname) values($1, $2, $3, $4, $5, $6, $7)', [newOrderId, username, itemId, quantity, timestamp, status, vendorUsername], function(error, result){
+					if(error){
+						console.log(error);
+						res.status(500).send(error);
+					}else{
+						++noOfRows;
+						if(noOfRows==(order.length)){
+							res.status(200).send({message: 'Order successfully placed', orderId: newOrderId});
+						}
+					}
+				});
+			}
+		}
+	});
+
+});
+
+//Check whether an order is prepared or not
+app.get('/order/check/:order_id', function(req, res){
+	var orderId = req.params.order_id;
+	client.query('select * from orders where order_id = $1 and status = $2', [orderId, 'NOT PREPARED'], function(error, result){
+		if(error){
+			console.log(error);
+			res.status(500).send(error);
+		}else{
+			if(result['rows'].length===0){
+				res.status(200).send({message: true});
+			}else{
+				res.status(200).send({message: false});
+			}
+		}
+	});
+});
+
+
 
 //------------------------------------------------------VENDOR ROUTES----------------------------------------------------------------
 
@@ -141,7 +234,9 @@ app.post('/shops/:id', function(req, res){
 	var shopId = req.params.id;
 	var name = req.body.name;
 	var price = req.body.price;
-	client.query('insert into menu_items(shop_id, item_name, price, is_available) values($1, $2, $3, $4)',[shopId, name, price, true], function(error, result){
+	var prepTime = req.body.preparation_time;
+	var bucketSize = req.body.bucket_size;
+	client.query('insert into menu_items(shop_id, item_name, price, is_available, preparation_time, bucket_size) values($1, $2, $3, $4, $5, $6)',[shopId, name, price, true, prepTime, bucketSize], function(error, result){
 		if(error){
 			console.log(error);
 			res.status(500).send({message: error});
@@ -157,13 +252,41 @@ app.put('/shops/item/:id', function(req, res){
 	var name = req.body.name;
 	var price = req.body.price;
 	var isAvailable = req.body.is_available;
+	var prepTime = req.body.preparation_time;
+	var bucketSize = req.body.bucket_size;
 
-	client.query('update menu_items set item_name=$1, price=$2, is_available=$3 where id=$4',[name, price, isAvailable, id], function(error, results){
+	client.query('update menu_items set item_name=$1, price=$2, is_available=$3, preparation_time=$5, bucket_size=$6 where id=$4',[name, price, isAvailable, id, prepTime, bucketSize], function(error, results){
 		if(error){
 			console.log(error);
 			res.status(500).send({message: error});
 		}else{
 			res.status(200).send({message: "Item details updated successfully"});
+		}
+	});
+});
+
+//Get the current Order pool
+app.get('/order/:vendor_uname', function(req, res){
+	var vendorUsername = req.params.vendor_uname;
+	client.query('select * from orders where vendor_uname = $1 and status = $2', [vendorUsername, 'NOT PREPARED'], function(error, results){
+		if(error){
+			console.log(error);
+			res.status(500).send(error);
+		}else{
+			res.status(200).send({orders: results['rows']});
+		}
+	});
+});
+
+//Mark a particular order as updated
+app.put('/order', function(req, res){
+	var id = req.body.id;
+	client.query('update orders set status = $1 where id = $2',['PREPARED', id], function(error, result){
+		if(error){
+			console.log(error);
+			res.status(500).send(error);
+		}else{
+			res.status(200).send({message: "Order marked as prepared"});
 		}
 	});
 });
@@ -181,7 +304,7 @@ app.post('/shops', function(req, res){
 			console.log(err);
 			res.status(400).send({message: `Couldn't hash the password`});
 		}
-		client.query('insert into shops(name, vendor_uname, password, is_open) values($1, $2, $3, false)',[name, vendorUsername, hash], function(error, result){
+		client.query('insert into vendors(name, vendor_uname, password, is_open) values($1, $2, $3, false)',[name, vendorUsername, hash], function(error, result){
 			if(error){
 				console.log(error);
 				res.status(500).send({message: error});
